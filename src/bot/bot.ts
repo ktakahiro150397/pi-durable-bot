@@ -24,7 +24,7 @@ import { MEMORY_DIR, POTS_HOME, SECRETS_DIR } from "../core/home.ts";
 import { VERSION } from "../core/version.ts";
 import type { Judge } from "../core/judge.ts";
 import { formatTime } from "../core/time.ts";
-import type { Delivered, PlaceWake, WakeTarget } from "../core/wake.ts";
+import type { Delivered, InputFeedback, InputFeedbackEvent, PlaceWake, WakeTarget } from "../core/wake.ts";
 import type { Print, RunCommand } from "../gateway/config.ts";
 import { renderForms } from "../gateway/forms.ts";
 import { Gateway, type TimersHandle } from "../gateway/gateway.ts";
@@ -34,6 +34,7 @@ import type { PageHost } from "../pages/host.ts";
 import { BotPages, secretCrashTests } from "../pages/store.ts";
 import { ControlServer } from "./control.ts";
 import { type BotDefinition, type BotPaths, botPaths } from "./definition.ts";
+import { DiscordFeedback, type FeedbackTarget } from "./discord-feedback.ts";
 import { describeMachine } from "./machine.ts";
 import { listMemoryFiles, memoryProgress, readIndex, recordMemoryChange, settleMemory } from "./memory.ts";
 import {
@@ -66,6 +67,10 @@ CREATE TABLE IF NOT EXISTS bot_wakes (
   place TEXT,
   text TEXT NOT NULL,
   submission TEXT
+);
+CREATE TABLE IF NOT EXISTS bot_discord_feedback (
+  wake_id TEXT PRIMARY KEY,
+  targets TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS bot_state (
   key TEXT PRIMARY KEY,
@@ -131,6 +136,9 @@ export class Bot implements WakeTarget {
   readonly #failureNotices = new Map<Address, { sendId: string; state: "sending" | "sent" | "unsent" }>();
   /** Places the agent sent or reacted to in its current busy period. */
   readonly #touched = new Set<Address>();
+  readonly #discordFeedback: DiscordFeedback;
+  readonly #discordAbort = new AbortController();
+  readonly #discordTasks = new Map<string, Promise<void>>();
 
   private constructor(init: {
     id: string;
@@ -155,6 +163,7 @@ export class Bot implements WakeTarget {
     this.#print = init.print;
     this.#sql = init.sql;
     this.#gateway = init.gateway;
+    this.#discordFeedback = new DiscordFeedback((address) => this.#gateway.channels.find((channel) => channel.owns(address)), this.#print);
     this.#timers = init.timers;
     this.#agent = init.agent;
     this.#pages = init.pages;
@@ -431,6 +440,7 @@ export class Bot implements WakeTarget {
     try {
       adapters = await Promise.all(definition.channels.map((channel) => bot!.#loadChannel(channel)));
       await gateway.start(bot, adapters);
+      await bot.#resumeInputFeedback();
       await agent.resume();
       await timers.start();
       if (existsSync(paths.firstWake)) {
@@ -466,6 +476,8 @@ export class Bot implements WakeTarget {
       this.#pages.login.stop();
       await this.#control.stop();
       await this.#gateway.pauseWakes();
+      this.#discordAbort.abort();
+      await Promise.all(this.#discordTasks.values());
       await this.#agent.close();
     } finally {
       // Also when a step above failed: a bot that is stopped must not keep its channels or its file open.
@@ -537,11 +549,60 @@ export class Bot implements WakeTarget {
     return places.size === 1 ? [...places][0] : undefined;
   }
 
-  async deliver(wake: PlaceWake, caller?: TelemetrySpan): Promise<Delivered> {
+  beginInputFeedback(events: readonly InputFeedbackEvent[], place: Address): InputFeedback {
+    const targets = this.#discordFeedback.targets(events, place);
+    const lease = this.#discordFeedback.start(targets, true);
+    return { ...lease, complete: () => this.#discordFeedback.finish(targets, true) };
+  }
+
+  async deliver(wake: PlaceWake, caller?: TelemetrySpan, acknowledged = false): Promise<Delivered> {
     const me = this.#gateway.channels.find((channel) => channel.owns(wake.place.address))?.me;
     const children = await this.#agent.childrenNow(this.#workingChildren(wake.place.address));
     const text = renderPlaceWake(wake, await this.#agent.contextStatus(), me, children);
-    return this.#submit(wake.id, wake.reason, wake.place.address, text, wake.reason === "steer", caller);
+    const targets = this.#discordFeedback.targets(wake.events, wake.place.address);
+    const submit = () => this.#submit(wake.id, wake.reason, wake.place.address, text, wake.reason === "steer", caller);
+    if (!targets.length) return submit();
+    // Write the feedback target before submitting, so a restart can follow the same input.
+    await this.#sql.run("INSERT OR IGNORE INTO bot_discord_feedback (wake_id, targets) VALUES (?, ?)", wake.id, JSON.stringify(targets));
+    const lease = this.#discordFeedback.start(targets, !acknowledged && !(await this.#agent.submitted(wake.id)));
+    try {
+      await lease.ready;
+      const delivered = await submit();
+      this.#watchInputFeedback(wake.id, delivered.submission, targets, lease);
+      return delivered;
+    } catch (error) {
+      lease.stop();
+      throw error;
+    }
+  }
+
+  async #resumeInputFeedback(): Promise<void> {
+    const pending = await this.#sql.all<{ wake_id: string; targets: string; submission: string }>(
+      "SELECT f.wake_id, f.targets, w.submission FROM bot_discord_feedback f JOIN bot_wakes w ON w.id = f.wake_id WHERE w.submission IS NOT NULL",
+    );
+    for (const row of pending) this.#watchInputFeedback(row.wake_id, row.submission, JSON.parse(row.targets) as FeedbackTarget[]);
+  }
+
+  #watchInputFeedback(wakeId: string, submission: string, targets: readonly FeedbackTarget[], lease?: ReturnType<DiscordFeedback["start"]>): void {
+    if (this.#discordTasks.has(wakeId)) {
+      lease?.stop();
+      return;
+    }
+    const signal = this.#discordAbort.signal;
+    const task = this.#agent.waitForSubmission(submission, signal, () => {
+      lease ??= this.#discordFeedback.start(targets, false);
+    }).then(async (completed) => {
+      lease?.stop();
+      if (signal.aborted) return;
+      await this.#discordFeedback.finish(targets, completed);
+      await this.#sql.run("DELETE FROM bot_discord_feedback WHERE wake_id = ?", wakeId);
+    }).catch((error: unknown) => {
+      if (!signal.aborted) this.#print("Discord input status could not be settled", { wakeId, error: String(error) });
+    }).finally(() => {
+      lease?.stop();
+      this.#discordTasks.delete(wakeId);
+    });
+    this.#discordTasks.set(wakeId, task);
   }
 
   responsibilities(): Promise<string> {

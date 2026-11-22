@@ -60,6 +60,8 @@ export const Happening = Schema.Struct({
   /** Done by this channel account itself. */
   fromMe: Schema.Boolean,
   mentionsMe: Schema.optional(Schema.Boolean),
+  /** Keep this event in history without offering it as a wake. */
+  logOnly: Schema.optional(Schema.Boolean),
   /** Message text for "message" and "edit"; the emoji for reactions. */
   text: Schema.optional(Schema.String),
   /** People mentioned in the text. */
@@ -149,7 +151,8 @@ export interface ChannelAdapter {
   checkText?(to: Address, text: string): string | undefined;
   /** Look for a message with this send ID, sent to `to` after `since`. */
   findSent(to: Address, sendId: string, since: number): Promise<SentMessage | undefined>;
-  react(message: Address, emoji: string, remove: boolean): Promise<void>;
+  react(message: Address, emoji: string, remove: boolean, signal?: AbortSignal): Promise<void>;
+  typing?(place: Address, signal?: AbortSignal): Promise<void>;
   /** Call a platform API method directly. The token stays in the adapter. */
   call(method: string, params: Record<string, unknown>): Promise<unknown>;
   /**

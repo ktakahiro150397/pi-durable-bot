@@ -26,6 +26,7 @@ EXTENDS Naturals, Sequences, FiniteSets
 
 CONSTANTS
     Events,      \* events on the platform
+    Passive,     \* events that are logged without waking the agent
     Reasons,     \* wake reasons the waker may give
     MaxRepeats,  \* how often the platform may deliver an acknowledged event again (backfill, retries)
     MaxCrashes
@@ -107,9 +108,10 @@ Apply ==
         /\ logged' = [logged EXCEPT ![e] = @ + 1]
         /\ row' = [row EXCEPT ![e] = nextRow]
         /\ nextRow' = nextRow + 1
-        /\ batch' = batch \cup {e}
+        /\ batch' = IF e \in Passive THEN batch ELSE batch \cup {e}
+        /\ decided' = IF e \in Passive THEN decided \cup {e} ELSE decided
     /\ queue' = Tail(queue)
-    /\ UNCHANGED <<acked, repeats, receiving, received, decided, pending, wakes, woken, deciding, crashes>>
+    /\ UNCHANGED <<acked, repeats, receiving, received, pending, wakes, woken, deciding, crashes>>
 
 \* The waker's timer fires: the whole batch is decided, with a reason. Reading its text and waiting for its files come
 \* before RecordWake and change nothing the model tracks (saved files are not in it); a crash in that time leaves the
@@ -201,7 +203,10 @@ DecidedAreLogged == \A e \in decided : row[e] > 0
 \* with a new event in the group, so the wake had another ID.)
 WokenOnce == \A e \in Events : woken[e] <= 1
 
-\* Nothing acknowledged is lost: every acknowledged event is decided, and reaches the agent, in the end.
-NothingLost == \A e \in Events : (e \in acked) ~> (e \in decided /\ woken[e] = 1)
+\* Passive events stay in the log and never become part of a wake.
+PassiveNeverWakes == \A e \in Passive : woken[e] = 0
+
+\* Every acknowledged event is decided; active events reach the agent exactly once.
+NothingLost == \A e \in Events : (e \in acked) ~> (e \in decided /\ woken[e] = (IF e \in Passive THEN 0 ELSE 1))
 
 =============================================================================

@@ -60,7 +60,7 @@ const DEFAULT_SETTINGS: BotSettings = {
   debounceMaxMs: 20_000,
   judgeThreshold: 0.5,
   judgeContextMessages: 20,
-  fallbackWakeMinutes: 120,
+  fallbackWakeMinutes: 0,
   compaction: {},
   maxChildren: 50,
   autoMemory: true,

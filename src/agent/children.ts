@@ -471,7 +471,11 @@ export function childrenExtension(host: ChildrenHost): Extension {
           // The child's tools and prompt, and the model for children.
           await configure(tx, conversation.id, { extensions: host.extensions(), model, thinkingLevel });
           const now = api.now();
-          const reporter = await tx.createTask(Reporter, { child: id, conversationId: conversation.id, message: `[brief from the main agent]\n${args.brief}` }, background);
+          const brief = `[brief from the main agent]\n${args.brief}`;
+          const message = model.provider === "omlx-local" && model.modelId.toLowerCase().startsWith("gemma-4-")
+            ? `${brief}\n\n[Pots child result] Put the result in your final answer. Pots returns it to the parent, who sends any reply. If the brief contains everything you need, answer directly.`
+            : brief;
+          const reporter = await tx.createTask(Reporter, { child: id, conversationId: conversation.id, message }, background);
           state.children[id] = {
             id,
             title: args.title!.trim(),

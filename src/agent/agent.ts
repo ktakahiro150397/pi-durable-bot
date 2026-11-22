@@ -60,6 +60,7 @@ import type { Codemode } from "./codemode.ts";
 import type { Mcp } from "./mcp.ts";
 import { deleteLeftForks, lastAnswer, type MemoryHost, MemoryPasses, readPaths, withAgeNote } from "./memory.ts";
 import { modelRef, POTS_IDENTITY, requireModel } from "./models.ts";
+import { replyRecovery, replyRecoveryTools } from "./reply-recovery.ts";
 import type { CommandScopes } from "./scopes.ts";
 import { NO_SCREEN, renderBusy, type Screen, ScreenLeases } from "./screen.ts";
 import { CacheWarming, type CacheWarmingMode } from "./warming.ts";
@@ -462,7 +463,7 @@ export class Agent {
       name: "bot",
       tools: [...channelTools, screenTool],
       sections: options.sections.map((part) => section(part.name, render(part), { tag: false })),
-      hooks: [recordRefresh],
+      hooks: [recordRefresh, replyRecovery, replyRecoveryTools],
     });
     /** The text a pinned section had at a child's first request: its first system entry has every section. */
     const firstText = async (conversation: ConversationId, name: string, context: Context) => {
@@ -979,6 +980,17 @@ export class Agent {
   /** Whether text with this ID was handed to the agent before: then submit gives that submission, and the new text is not used. */
   async submitted(id: string): Promise<boolean> {
     return this.#root.commit(async (tx) => (await tx.submissionByRequest(ROOT_CONVERSATION_ID, id)) !== undefined, context);
+  }
+
+  /** Follow one input through its durable settlement, including while it waits behind another run. */
+  async waitForSubmission(id: string, signal: AbortSignal, pending: () => void): Promise<boolean> {
+    const wait = withAbortSignal(signal, context);
+    const submission = await this.#harness.submission(Number(id) as SubmissionId, wait);
+    if (!submission) return false;
+    const record = await submission.status(wait);
+    if (record.status !== "queued" && record.status !== "placed") return record.status === "done";
+    pending();
+    return (await submission.wait(wait)).status === "done";
   }
 
   /** Why a run with these submissions got no answer, such as a missing login; undefined when they were answered. */

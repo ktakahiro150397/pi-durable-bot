@@ -5,6 +5,8 @@
 (* then decides on the whole group at once. An event that mentions the bot,*)
 (* is in a DM, or answers the bot (its button, menu, command or form was   *)
 (* used) ends the wait when it comes, with itself in the group.            *)
+(* Passive events are settled before they reach this model (Inbox.tla). *)
+(* Input feedback can delay delivery after a group has been selected.    *)
 (* Time is in whole seconds.                                               *)
 (*                                                                         *)
 (* Assumptions: a timer fires when it is due (a busy process can fire it a *)

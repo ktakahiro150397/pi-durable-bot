@@ -414,7 +414,7 @@ async function applyOne(tx: SqlExecutor, channel: string, eventId: string, h: Ha
 
   // Own events never notify the bot. Deletes are only logged, and so is a click that opened a form: its submission is
   // the event that says something. Everything else waits for the waker's decision.
-  const wake = h.fromMe ? "self" : h.kind === "delete" || h.kind === "form_opened" ? "log" : null;
+  const wake = h.fromMe ? "self" : h.logOnly || h.kind === "delete" || h.kind === "form_opened" ? "log" : null;
   const event = await tx.get<{ id: number }>(
     `INSERT INTO gw_events (channel, inbox_event, kind, at, place, thread, message, person, from_me, mentions_me, text, raw, wake)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,

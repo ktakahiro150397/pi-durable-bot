@@ -77,7 +77,7 @@ After the restart the bot must send once, be woken once, and make the memory pas
 | Model | What TLC checks |
 |---|---|
 | `Outbox.tla` | No send ID reaches the platform twice, however often the process dies; every send goes out in the end. It assumes the platform finds a sent message by its send ID. Slack does, by the message's metadata. Discord does not: there a send again carries the same nonce, and Discord answers with the first message if it came in the past few minutes. Telegram cannot at all, so there a crash at the moment of a send can send it twice. |
-| `Inbox.tla` | An event is on disk before the adapter acknowledges it; an event the platform delivers again is logged once; every acknowledged event is decided and reaches the agent; no event reaches the agent in two wakes. |
+| `Inbox.tla` | An event is on disk before the adapter acknowledges it; an event the platform delivers again is logged once; every acknowledged event is decided; active events reach the agent once and passive events stay in the log. |
 | `Debounce.tla` | A group of events is decided 3 seconds after its last event or 20 seconds after its first, whichever comes first, or at once when a mention, a DM or an answer to the bot (its button, menu, command or form was used) comes, with that event in it; groups of a place follow each other; every event is in exactly one group. `Debounce.places.cfg` checks two places at once with shorter waits. |
 
 To run TLC you need Java 11 or newer and `tla2tools.jar` from the [TLA+ releases](https://github.com/tlaplus/tlaplus/releases). Put the jar in `.tla/tla2tools.jar` (git ignores `.tla/`), or set `TLA2TOOLS` to its path:

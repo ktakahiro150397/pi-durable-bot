@@ -97,21 +97,21 @@ describe("bot.json while running", { timeout: 90_000 }, () => {
     const definition = JSON.parse(readFileSync(file, "utf8")) as { settings: Record<string, unknown> };
     gateway.say("general", "alice", `@${ME} hello`);
     await waitFor(() => gateway.sent().length === 1, { what: "the reply" });
-    expect(lastPrompt()).toContain("a fallback check-in comes every 120 minutes");
+    expect(lastPrompt()).toContain("Automatic fallback check-ins are disabled.");
 
     // The start of each request stays as it was, so the provider's prompt cache keeps serving it.
     writeFileSync(file, `${JSON.stringify({ ...definition, settings: { ...definition.settings, fallbackWakeMinutes: 45 } }, null, 2)}\n`);
     await waitFor(() => gateway.output.some((line) => line.message === "definition applied"), { what: "the new definition" });
     gateway.say("general", "alice", `@${ME} still the same page?`);
     await waitFor(() => gateway.sent().length === 2, { what: "the second reply" });
-    expect(lastPrompt()).toContain("a fallback check-in comes every 120 minutes");
+    expect(lastPrompt()).toContain("Automatic fallback check-ins are disabled.");
     expect(lastPrompt()).not.toContain("every 45 minutes");
 
     expect((await gateway.run(["turn-page", "--note", "a new page"])).status).toBe(0);
     gateway.say("general", "alice", `@${ME} and on the new page?`);
     await waitFor(() => gateway.sent().length === 3, { what: "the reply on the new page" });
     expect(lastPrompt()).toContain("a fallback check-in comes every 45 minutes");
-    expect(lastPrompt()).not.toContain("every 120 minutes");
+    expect(lastPrompt()).not.toContain("Automatic fallback check-ins are disabled.");
   });
 
   it("starts a bot whose folder appears and stops one whose folder goes", async () => {

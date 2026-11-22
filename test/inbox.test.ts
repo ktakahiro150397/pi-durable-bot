@@ -61,6 +61,18 @@ describe("inbox", () => {
       }),
     ));
 
+  it.effect("records log-only events without offering them to the waker", () =>
+    withCore({}, (recorder, sql) =>
+      Effect.gen(function* () {
+        (yield* Waker).setTarget(recorder.target());
+        const channel = new Scripted((raw) => [{ ...message("general", raw.id), logOnly: raw.id === "passive" }]);
+        const { logged } = yield* deliver(channel, ["passive", "active"]);
+        assert.deepStrictEqual(logged, ["active"]);
+        const states = yield* Effect.promise(() => sql.all("SELECT text, wake FROM gw_events ORDER BY id"));
+        assert.deepStrictEqual(states, [{ text: "passive", wake: "log" }, { text: "active", wake: null }]);
+      }),
+    ));
+
   it.effect("marks a bad event as failed, says why, and goes on with the next ones", () =>
     withCore({}, (recorder, sql) =>
       Effect.gen(function* () {

@@ -17,6 +17,20 @@ const routineWakes = (recorder: Recorder) =>
 const pass = (ms: number) => advance(ms, 10 * SECOND);
 
 describe("timers", () => {
+  it.effect("retires an overdue fallback at startup while a timer can still fire", () =>
+    withCore({ fallbackWakeMinutes: 0 }, (recorder, sql) =>
+      Effect.gen(function* () {
+        const timers = yield* Timers;
+        yield* Effect.promise(() => sql.run("INSERT INTO bot_timers (due_at, note, state, set_by, created_at) VALUES (0, '', 'pending', 'fallback', 0)"));
+        yield* timers.start;
+        assert.deepStrictEqual(yield* timers.pending, []);
+        yield* timers.add(MINUTE, "explicit wake");
+        yield* advance(MINUTE);
+        assert.deepStrictEqual(recorder.timers.map(({ timer }) => [timer.set_by, timer.note]), [["agent", "explicit wake"]]);
+        assert.deepStrictEqual(yield* timers.pending, []);
+      }),
+    ));
+
   it.effect("keep one fallback wake while the agent has none, and fire it on time", () =>
     withCore({ fallbackWakeMinutes: 120 }, (recorder) =>
       Effect.gen(function* () {

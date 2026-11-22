@@ -366,6 +366,25 @@ describe("Discord channel", () => {
     ]);
   });
 
+  it("keeps passive Discord activity in history and admits addressed bot handoffs", async () => {
+    const { gateway, translate } = await connect();
+    const peer = { ...BOB, bot: true };
+    const events = await gateway([
+      ["MESSAGE_CREATE", message({ id: "551", author: peer, content: "I replied" })],
+      ["MESSAGE_CREATE", message({ id: "552", author: peer, content: "<@100> please take this", mentions: [BOT] })],
+      ["THREAD_UPDATE", { ...thread("600", "20", "Release plan"), thread_metadata: { archived: true } }],
+      ["MESSAGE_UPDATE", message({ id: "553", content: "preview arrived" })],
+      ["MESSAGE_CREATE", message({ id: "554", author: ALICE, content: "new request" })],
+    ]);
+    const [reply, handoff, notice, metadata, human] = await Promise.all(events.map(async (event) => (await translate(event.raw))[0]!));
+    expect(reply).toMatchObject({ kind: "message", logOnly: true });
+    expect(handoff).toMatchObject({ mentionsMe: true });
+    expect(handoff?.logOnly).toBeUndefined();
+    expect(notice).toMatchObject({ kind: "system", logOnly: true });
+    expect(metadata).toMatchObject({ kind: "update", logOnly: true });
+    expect(human?.logOnly).toBeUndefined();
+  });
+
   it("translates an edit once, an update, a delete and reactions", async () => {
     const { fake, gateway, translate } = await connect();
     fake.route("GET", "/users/201", () => BOB);
@@ -654,6 +673,13 @@ describe("Discord channel", () => {
     expect(body().path).toBe("/channels/700/messages");
     expect(dm).toMatchObject({ place: "discord:#700", message: "discord:#700/907" });
     expect(await channel.findSent("discord:#20", "tool:abc", 0)).toBeUndefined();
+  });
+
+  it("shows typing on the actual thread address", async () => {
+    const { channel, fake } = await connect();
+    fake.route("POST", "/channels/600/typing", () => undefined);
+    await channel.typing("discord:#20/600");
+    expect(fake.requested("POST", "/channels/600/typing")).toHaveLength(1);
   });
 
   it("reacts with Unicode, custom and named emoji, in the message's own channel", async () => {

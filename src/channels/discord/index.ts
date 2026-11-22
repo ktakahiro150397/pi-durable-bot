@@ -63,6 +63,7 @@ interface FormClick {
 type Parsed = { channel: string; thread?: string; message?: string } | { user: string };
 
 interface ApiUser {
+  bot?: boolean;
   id: string;
   username?: string;
   global_name?: string | null;
@@ -207,7 +208,7 @@ export class DiscordChannel implements ChannelAdapter {
   #refilling: Promise<void> = Promise.resolve();
   readonly #channels = new Map<string, { channel: ApiChannel; at: number }>();
   readonly #guilds = new Map<string, { guild: GuildInfo; at: number }>();
-  readonly #people = new Map<string, { person: PersonInfo; at: number }>();
+  readonly #people = new Map<string, { person: PersonInfo; bot: boolean; at: number }>();
   /** The DM channel with each person the bot sent to. */
   readonly #dms = new Map<string, string>();
 
@@ -505,8 +506,16 @@ export class DiscordChannel implements ChannelAdapter {
         return Promise.all((d.ids as string[]).map((id) => this.#deleted(id, d.channel_id, d.guild_id, at, d, parent)));
       case "MESSAGE_REACTION_ADD":
       case "MESSAGE_REACTION_REMOVE": {
-        const where = await this.#locate(d.channel_id, undefined, parent);
         const emoji = d.emoji as { id?: string | null; name?: string | null; animated?: boolean };
+        const user: ApiUser | string = d.member?.user ?? d.user_id;
+        if (!emoji.id && (emoji.name === "👀" || emoji.name?.replace(/\uFE0F/g, "") === "☑")) {
+          if (d.user_id === this.#botUserId || (typeof user !== "string" && user.bot)) return [];
+          if (typeof user === "string") {
+            await this.#personInfo(user);
+            if (this.#people.get(user)?.bot) return [];
+          }
+        }
+        const where = await this.#locate(d.channel_id, undefined, parent);
         return [
           {
             kind: t === "MESSAGE_REACTION_ADD" ? "reaction_added" : "reaction_removed",
@@ -514,7 +523,7 @@ export class DiscordChannel implements ChannelAdapter {
             place: await this.#placeInfo(where.place, d.guild_id),
             message: this.#messageAt(where, d.message_id),
             ...(where.thread ? { thread: this.#threadAt(where) } : {}),
-            person: await this.#personInfo(d.member?.user ?? d.user_id),
+            person: await this.#personInfo(user),
             fromMe: d.user_id === this.#botUserId,
             text: emoji.id ? `<${emoji.animated ? "a" : ""}:${emoji.name}:${emoji.id}>` : (emoji.name ?? "?"),
             raw: d,
@@ -532,6 +541,7 @@ export class DiscordChannel implements ChannelAdapter {
           {
             // A deleted thread is only logged, as a deleted message is.
             kind: t === "THREAD_DELETE" ? "delete" : "system",
+            logOnly: true,
             at,
             place: await this.#placeInfo(thread.parent_id, thread.guild_id),
             thread: this.#threadAt(where),
@@ -581,6 +591,7 @@ export class DiscordChannel implements ChannelAdapter {
         ...(author ? { person: await this.#personInfo(author) } : {}),
         fromMe: author !== undefined && author.id === this.#botUserId,
         mentionsMe,
+        ...(author?.bot === true && !mentionsMe ? { logOnly: true } : {}),
         text: await this.#text(message, guild),
         mentions: (message.mentions ?? []).map((user) => this.person(user.id)),
         ...files(message),
@@ -607,6 +618,7 @@ export class DiscordChannel implements ChannelAdapter {
     return [
       {
         kind: "system",
+        logOnly: true,
         at: Number.isFinite(time) ? time : at,
         place: await this.#placeInfo(where.place, guildId),
         message: this.#messageAt(where, about),
@@ -642,6 +654,7 @@ export class DiscordChannel implements ChannelAdapter {
     return [
       {
         kind: "update",
+        logOnly: true,
         at,
         place: await this.#placeInfo(where.place, message.guild_id),
         message: this.#messageAt(where, message.id),
@@ -835,7 +848,7 @@ export class DiscordChannel implements ChannelAdapter {
     if (id === this.#botUserId) return this.me!;
     if (typeof user !== "string" && user.username) {
       const person = { address: this.person(id), name: displayName(user) };
-      this.#people.set(id, { person, at: Date.now() });
+      this.#people.set(id, { person, bot: user.bot === true, at: Date.now() });
       return person;
     }
     const cached = this.#people.get(id);
@@ -1059,22 +1072,29 @@ export class DiscordChannel implements ChannelAdapter {
     }
   }
 
+  /** Show the input indicator on a channel or a thread. */
+  async typing(to: Address, signal?: AbortSignal): Promise<void> {
+    const parsed = this.#parse(to);
+    if (!("channel" in parsed)) throw new Error(`not a place or thread address: ${to}`);
+    await explained(this.#rest.post(`/channels/${parsed.message ?? parsed.channel}/typing`, signal ? { signal } : undefined));
+  }
+
   /**
    * React with a Unicode emoji, a custom emoji as name:id or <:name:id>, or a name such as :thumbsup:. Adding a
    * reaction that is there, or removing one that is not, changes nothing and is not an error.
    */
-  react(message: Address, emoji: string, remove: boolean): Promise<void> {
-    return explained(this.#react(message, emoji, remove));
+  react(message: Address, emoji: string, remove: boolean, signal?: AbortSignal): Promise<void> {
+    return explained(this.#react(message, emoji, remove, signal));
   }
 
-  async #react(message: Address, emoji: string, remove: boolean): Promise<void> {
+  async #react(message: Address, emoji: string, remove: boolean, signal?: AbortSignal): Promise<void> {
     const parsed = this.#parse(message);
     if (!("channel" in parsed) || !parsed.message) throw new Error(`not a message address: ${message}`);
     // A forum post's first message is in the post's thread.
     const channel = parsed.thread ?? (FORUMS.has((await this.#channel(parsed.channel)).type) ? parsed.message : parsed.channel);
     const route = `/channels/${channel}/messages/${parsed.message}/reactions/${encodeURIComponent(reactionEmoji(emoji))}/@me` as const;
-    if (remove) await this.#rest.delete(route);
-    else await this.#rest.put(route);
+    if (remove) await this.#rest.delete(route, signal ? { signal } : undefined);
+    else await this.#rest.put(route, signal ? { signal } : undefined);
   }
 
   /**

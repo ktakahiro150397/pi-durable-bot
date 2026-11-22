@@ -80,6 +80,20 @@ export interface Delivered {
   readonly run?: TelemetryCarrier | undefined;
 }
 
+/** The fields of a logged input that a channel may acknowledge before it is judged. */
+export interface InputFeedbackEvent {
+  readonly kind: string;
+  readonly message?: Address | null;
+  readonly thread?: Address | null;
+  readonly deleted?: boolean;
+}
+
+export interface InputFeedback {
+  readonly ready: Promise<unknown>;
+  stop(): void;
+  complete(): Promise<void>;
+}
+
 /** The bot, as the gateway's waker sees it. */
 export interface WakeTarget {
   /** True while the bot's current work is about this place. */
@@ -88,7 +102,8 @@ export interface WakeTarget {
    * Hand the wake to the bot. Durable once it resolves. caller: the wake's span, for the agent's telemetry to link its
    * run to.
    */
-  deliver(wake: PlaceWake, caller?: TelemetrySpan): Promise<Delivered>;
+  deliver(wake: PlaceWake, caller?: TelemetrySpan, acknowledged?: boolean): Promise<Delivered>;
+  beginInputFeedback?(events: readonly InputFeedbackEvent[], place: Address): InputFeedback;
   /** What the bot is responsible for, for the judge. */
   responsibilities(): Promise<string>;
   /** The bot's name, for the judge. */

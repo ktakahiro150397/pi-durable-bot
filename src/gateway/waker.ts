@@ -104,11 +104,11 @@ export class Waker extends Context.Service<
       const hooks: WakerHooks = {};
 
       /** Hand a recorded wake to the bot, and forget it once the bot has it. */
-      const handOver = (bot: WakeTarget, wake: PlaceWake) =>
+      const handOver = (bot: WakeTarget, wake: PlaceWake, acknowledged = false) =>
         Effect.gen(function* () {
           const span = Option.getOrUndefined(yield* Effect.option(Effect.currentSpan));
           const { submission, run } = yield* Effect.tryPromise({
-            try: () => bot.deliver(wake, span && telemetry.view(span)),
+            try: () => bot.deliver(wake, span && telemetry.view(span), acknowledged),
             catch: (cause) => new DeliverError({ message: message(cause), cause }),
           }).pipe(Effect.withSpan("wake.deliver", { attributes: { wake: wake.id } }));
           hooks.afterDeliver?.(wake.id);
@@ -130,42 +130,52 @@ export class Waker extends Context.Service<
           const id = (reason: string) => `${reason}:${place.address}:${ids.at(-1)}`;
           yield* Effect.annotateCurrentSpan({ place: place.address, events: ids.join(",") });
 
-          const deliver = (reason: PlaceWakeReason, decision: string, judged?: PlaceWake["judged"]) =>
-            Effect.gen(function* () {
-              const files = yield* Effect.forEach(events, (event) => attachments.files(event), { concurrency: "unbounded" });
-              // The bot may have started working on this place while the files came.
-              if (reason !== "steer" && bot.isWorkingOn(place.address)) {
-                reason = "steer";
-                decision = "steer";
-                judged = undefined;
-              }
-              const wakeEvents = yield* withContent(events, files);
-              const wake: PlaceWake = { id: id(reason), reason, place, events: wakeEvents, ...(judged ? { judged } : {}) };
-              yield* log.recordWake(wake, ids, decision);
-              yield* handOver(bot, wake);
-            });
+          const progress = bot.beginInputFeedback?.(events, place.address);
+          try {
+            if (progress) yield* Effect.promise(() => progress.ready);
+            const deliver = (reason: PlaceWakeReason, decision: string, judged?: PlaceWake["judged"]) =>
+              Effect.gen(function* () {
+                const files = yield* Effect.forEach(events, (event) => attachments.files(event), { concurrency: "unbounded" });
+                // The bot may have started working on this place while the files came.
+                if (reason !== "steer" && bot.isWorkingOn(place.address)) {
+                  reason = "steer";
+                  decision = "steer";
+                  judged = undefined;
+                }
+                const wakeEvents = yield* withContent(events, files);
+                const wake: PlaceWake = { id: id(reason), reason, place, events: wakeEvents, ...(judged ? { judged } : {}) };
+                yield* log.recordWake(wake, ids, decision);
+                yield* handOver(bot, wake, progress !== undefined);
+              });
 
-          if (bot.isWorkingOn(place.address)) return yield* deliver("steer", "steer");
-          if (place.kind === "dm") return yield* deliver("dm", "dm");
-          if (events.some((event) => event.mentions_me)) return yield* deliver("mention", "mention");
-          if (events.some(answersMe)) return yield* deliver("interaction", "interaction");
+            if (bot.isWorkingOn(place.address)) return yield* deliver("steer", "steer");
+            if (place.kind === "dm") return yield* deliver("dm", "dm");
+            if (events.some((event) => event.mentions_me)) return yield* deliver("mention", "mention");
+            if (events.some(answersMe)) return yield* deliver("interaction", "interaction");
 
-          const judge = config.judge();
-          if (!judge) return yield* deliver("heard", "heard");
-          const settings = config.settings();
-          const answer = yield* Effect.result(askJudge(judge, bot, place, events, settings));
-          if (Result.isFailure(answer)) {
-            // The judge could not decide. Nothing is dropped: the bot gets the events and decides itself.
-            config.print("judge failed", { place: place.address, error: failureText(answer.failure) });
-            return yield* deliver("relevant", "relevant", { error: failureText(answer.failure) });
+            const judge = config.judge();
+            if (!judge) return yield* deliver("heard", "heard");
+            const settings = config.settings();
+            const answer = yield* Effect.result(askJudge(judge, bot, place, events, settings));
+            if (Result.isFailure(answer)) {
+              // The judge could not decide. Nothing is dropped: the bot gets the events and decides itself.
+              config.print("judge failed", { place: place.address, error: failureText(answer.failure) });
+              return yield* deliver("relevant", "relevant", { error: failureText(answer.failure) });
+            }
+            const { related, respond } = answer.success;
+            config.print("judge", { place: place.address, events: ids.length, related, respond });
+            if (related >= settings.judgeThreshold && respond >= settings.judgeThreshold) return yield* deliver("relevant", "relevant", answer.success);
+            // The bot may have started working on this place while the judge thought.
+            if (bot.isWorkingOn(place.address)) return yield* deliver("steer", "steer");
+            if (progress) {
+              progress.stop();
+              yield* Effect.promise(() => progress.complete());
+            }
+            yield* log.setWake(ids, "judge_no");
+            yield* Effect.annotateCurrentSpan({ reason: "judge_no" });
+          } finally {
+            progress?.stop();
           }
-          const { related, respond } = answer.success;
-          config.print("judge", { place: place.address, events: ids.length, related, respond });
-          if (related >= settings.judgeThreshold && respond >= settings.judgeThreshold) return yield* deliver("relevant", "relevant", answer.success);
-          // The bot may have started working on this place while the judge thought.
-          if (bot.isWorkingOn(place.address)) return yield* deliver("steer", "steer");
-          yield* log.setWake(ids, "judge_no");
-          yield* Effect.annotateCurrentSpan({ reason: "judge_no" });
         }).pipe(
           // No wake gives the files of events the judge said no to, or of a decision that failed.
           Effect.ensuring(Effect.forEach(events, (event) => attachments.drop(event), { discard: true })),

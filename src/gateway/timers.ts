@@ -153,9 +153,14 @@ export class Timers extends Context.Service<
 
         /** Keep a fallback wake while no wake set with pots wake is pending. Routines do not count. */
         const ensureFallback = Effect.gen(function* () {
+          const minutes = config.fallbackWakeMinutes();
+          if (minutes <= 0) {
+            yield* db(() => sql.run("UPDATE bot_timers SET state = 'replaced' WHERE state = 'pending' AND set_by = 'fallback'"));
+            return;
+          }
           if ((yield* pending).some((timer) => timer.set_by !== "routine")) return;
           const now = yield* Clock.currentTimeMillis;
-          const dueAt = now + config.fallbackWakeMinutes() * 60_000;
+          const dueAt = now + minutes * 60_000;
           yield* db(() => sql.run("INSERT INTO bot_timers (due_at, note, state, set_by, created_at) VALUES (?, '', 'pending', 'fallback', ?)", dueAt, now));
         });
 

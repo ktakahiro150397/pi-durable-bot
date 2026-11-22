@@ -4,6 +4,7 @@ import { type ClientIdentity, mergeClientIdentity } from "@earendil-works/pi-ai/
 import type { ModelRuntime, SettingsManager } from "@earendil-works/pi-coding-agent";
 import type { TelemetrySpan } from "@earendil-works/pi-telemetry";
 import { withCodexImages } from "./codex-images.ts";
+import { withLocalModelTimeout } from "./local-http.ts";
 
 /**
  * A module of pi-coding-agent that its package does not export. Only for what is not in its public entry; check each
@@ -43,8 +44,11 @@ export function usePiNetwork(): Promise<void> {
   network ??= (async () => {
     const [settings, http] = await Promise.all([piSettings(), import(piModule("./core/http-dispatcher.js"))]);
     const { applyHttpProxySettings, configureHttpDispatcher } = http as { applyHttpProxySettings(proxy: string | undefined): void; configureHttpDispatcher(timeoutMs?: number): void };
-    applyHttpProxySettings(settings().getGlobalSettings().httpProxy);
-    configureHttpDispatcher(settings().getHttpIdleTimeoutMs());
+    const proxy = settings().getGlobalSettings().httpProxy;
+    applyHttpProxySettings(proxy);
+    const idleTimeout = settings().getHttpIdleTimeoutMs();
+    configureHttpDispatcher(idleTimeout);
+    if (!proxy) globalThis.fetch = withLocalModelTimeout(globalThis.fetch, Math.max(600_000, idleTimeout ?? 0));
   })();
   return network;
 }

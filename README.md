@@ -80,7 +80,9 @@ It is woken in three ways, the same three ways a person notices work:
 |---|---|---|
 | **Someone asks** | gets a message or an @ | A mention or a DM wakes it at once |
 | **It notices** | overhears something that is their job | Every message that does not mention it comes to it too, and it decides itself whether it is about its work. You can also set a judge that reads these messages first and asks two questions: *is this about me?* and *should I respond?* It sees the bot's own list of responsibilities. The judge is a fast classifier such as TypeSafe's Jev, a local model, or the bot's own model |
-| **It checks in** | looks around now and then, and keeps promises | It sets its own timed wakes and routines: "check Acme's pricing every Monday", "follow up at 5 pm". While no timed wake is pending, it looks around every two hours |
+| **It checks in** | looks around now and then, and keeps promises | It sets its own timed wakes and routines: "check Acme's pricing every Monday", "follow up at 5 pm". Set a positive `settings.fallbackWakeMinutes` in `bot.json` to add an automatic check-in when no explicit wake is pending |
+
+Discord thread notices, metadata updates and bot messages without a mention of the receiving bot stay in history. For bot-to-bot handoffs, mention the receiving bot. Discord shows typing and marks incoming messages with 👀 during handling and ☑️ when handling completes.
 
 Being woken is not the same as speaking. Each time, the agent reads the log and decides if it should say anything, where, and when. Most of the time the right answer is to stay quiet.
 
@@ -135,7 +137,7 @@ It promises to come back, and it does. A timed wake (`pots wake`) wakes it once,
 - A command runs at most 10 minutes, or its `--timeout`; then Pots stops it and the processes it started. When the gateway stops, it stops the commands it runs.
 - Pots keeps each run's start, end, exit code and last lines of output for 7 days. A failed run (a non-zero exit code, or the timeout) wakes the bot once, with that output; later failures of the same routine do not, until one of its runs succeeds.
 - A script that calls `pots wake` says where the wake comes from with `--from <name>` (letters, digits, `-` and `_`), or `$POTS_FROM`. The wake then tells the bot that it comes from a command on this computer, not from a person, so outside text in its note, such as an email's subject, does not read as the bot's own plan. With `--id <id>`, a second `pots wake` with the same ID gives back the first wake and sets none, as `pots send --id` does.
-- The fallback check-in (`fallbackWakeMinutes` in `bot.json`, 120 by default) comes while no wake set with `pots wake` is pending. Routines do not hold it back.
+- A positive `settings.fallbackWakeMinutes` enables fallback check-ins when no wake set with `pots wake` is pending. The default is 0.
 
 ### 📓 Its own memory
 
@@ -230,6 +232,8 @@ Then set `"model": "ollama/qwen3:8b"`. The agent needs a model that calls tools 
 ```
 
 **Images.** A bot makes and edits images in `codemode` scripts with `models.generateImages()`; `models.getAvailableOfType("image")` lists the image models it can use. With the ChatGPT subscription signed in to pi (`openai-codex`), that is `openai-codex/gpt-image-2`, through the same endpoint the Codex CLI uses, on the subscription's Codex usage. ChatGPT decides which accounts may: when it answers 403, the Codex CLI's own image tool is refused too. OpenRouter's image models work with an OpenRouter key.
+
+For a local OpenAI-compatible endpoint, Pots allows up to ten minutes for response headers on loopback chat requests, or more if pi has a longer timeout. An explicit pi HTTP proxy keeps its own transport settings. With the `omlx-local` provider, Pots can retry delivery once when the parent leaves a DM or a child result as a private text draft. Gemma 4 child briefs remind the child to return its work in the final answer.
 
 ### MCP servers
 
