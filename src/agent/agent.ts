@@ -981,6 +981,17 @@ export class Agent {
     return this.#root.commit(async (tx) => (await tx.submissionByRequest(ROOT_CONVERSATION_ID, id)) !== undefined, context);
   }
 
+  /** Follow one input through its durable settlement, including any time it spent queued. */
+  async waitForSubmission(id: string, signal: AbortSignal, pending: () => void): Promise<boolean> {
+    const wait = withAbortSignal(signal, context);
+    const submission = await this.#harness.submission(Number(id) as SubmissionId, wait);
+    if (!submission) throw new Error(`unknown submission ${id}`);
+    const record = await submission.status(wait);
+    if (record.status !== "queued" && record.status !== "placed") return record.status === "done";
+    pending();
+    return (await submission.wait(wait)).status === "done";
+  }
+
   /** Why a run with these submissions got no answer, such as a missing login; undefined when they were answered. */
   async runError(inputs: readonly string[]): Promise<string | undefined> {
     for (const id of inputs) {

@@ -80,6 +80,17 @@ export interface Delivered {
   readonly run?: TelemetryCarrier | undefined;
 }
 
+export interface FeedbackMessage {
+  readonly message: Address;
+  readonly thread?: Address;
+}
+
+export interface InputProgress {
+  readonly ready: Promise<void>;
+  stop(): void;
+  complete(): Promise<void>;
+}
+
 /** The bot, as the gateway's waker sees it. */
 export interface WakeTarget {
   /** True while the bot's current work is about this place. */
@@ -88,7 +99,9 @@ export interface WakeTarget {
    * Hand the wake to the bot. Durable once it resolves. caller: the wake's span, for the agent's telemetry to link its
    * run to.
    */
-  deliver(wake: PlaceWake, caller?: TelemetrySpan): Promise<Delivered>;
+  deliver(wake: PlaceWake, caller?: TelemetrySpan, acknowledged?: boolean): Promise<Delivered>;
+  /** Acknowledge incoming messages before deciding whether a wake is needed. */
+  beginInputFeedback?(messages: readonly FeedbackMessage[], place: Address): InputProgress | undefined;
   /** What the bot is responsible for, for the judge. */
   responsibilities(): Promise<string>;
   /** The bot's name, for the judge. */

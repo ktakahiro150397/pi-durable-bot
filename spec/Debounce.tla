@@ -10,7 +10,8 @@
 (* Assumptions: a timer fires when it is due (a busy process can fire it a *)
 (* little later; the model does not show that delay). The channel of such *)
 (* an event runs: before it does, the event waits as others do, which      *)
-(* Arrive models.                                                          *)
+(* Arrive models. The acknowledgement, judge and platform calls within a   *)
+(* decision do not change which events belong to the group.                *)
 (***************************************************************************)
 EXTENDS Naturals
 

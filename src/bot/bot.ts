@@ -24,7 +24,7 @@ import { MEMORY_DIR, POTS_HOME, SECRETS_DIR } from "../core/home.ts";
 import { VERSION } from "../core/version.ts";
 import type { Judge } from "../core/judge.ts";
 import { formatTime } from "../core/time.ts";
-import type { Delivered, PlaceWake, WakeTarget } from "../core/wake.ts";
+import type { Delivered, FeedbackMessage, InputProgress, PlaceWake, WakeTarget } from "../core/wake.ts";
 import type { Print, RunCommand } from "../gateway/config.ts";
 import { renderForms } from "../gateway/forms.ts";
 import { Gateway, type TimersHandle } from "../gateway/gateway.ts";
@@ -34,6 +34,7 @@ import type { PageHost } from "../pages/host.ts";
 import { BotPages, secretCrashTests } from "../pages/store.ts";
 import { ControlServer } from "./control.ts";
 import { type BotDefinition, type BotPaths, botPaths } from "./definition.ts";
+import { type FeedbackLease, type FeedbackTarget, InputFeedback } from "./input-feedback.ts";
 import { describeMachine } from "./machine.ts";
 import { listMemoryFiles, memoryProgress, readIndex, recordMemoryChange, settleMemory } from "./memory.ts";
 import {
@@ -66,6 +67,10 @@ CREATE TABLE IF NOT EXISTS bot_wakes (
   place TEXT,
   text TEXT NOT NULL,
   submission TEXT
+);
+CREATE TABLE IF NOT EXISTS bot_input_feedback (
+  wake_id TEXT PRIMARY KEY,
+  targets TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS bot_state (
   key TEXT PRIMARY KEY,
@@ -131,6 +136,9 @@ export class Bot implements WakeTarget {
   readonly #failureNotices = new Map<Address, { sendId: string; state: "sending" | "sent" | "unsent" }>();
   /** Places the agent sent or reacted to in its current busy period. */
   readonly #touched = new Set<Address>();
+  readonly #inputFeedback: InputFeedback;
+  readonly #feedbackTasks = new Map<string, Promise<void>>();
+  readonly #feedbackAbort = new AbortController();
 
   private constructor(init: {
     id: string;
@@ -162,6 +170,7 @@ export class Bot implements WakeTarget {
     this.#scopes = init.scopes;
     this.#left = init.left;
     this.#judge = init.judge;
+    this.#inputFeedback = new InputFeedback((to) => this.#gateway.channels.find((channel) => channel.owns(to)), this.#print);
     this.#control = new ControlServer(init.paths.socket, this.#routes());
     let working: readonly string[] = [];
     this.#agent.onRunChange((inputs) => {
@@ -441,7 +450,9 @@ export class Bot implements WakeTarget {
       await bot.#control.start();
       env.pages.register(pages);
       pages.startCleanup();
+      await bot.#resumeInputFeedback();
     } catch (error) {
+      await bot.#stopInputFeedback();
       await timers.stop();
       await gateway.stop();
       throw error;
@@ -466,8 +477,10 @@ export class Bot implements WakeTarget {
       this.#pages.login.stop();
       await this.#control.stop();
       await this.#gateway.pauseWakes();
+      await this.#stopInputFeedback();
       await this.#agent.close();
     } finally {
+      await this.#stopInputFeedback();
       // Also when a step above failed: a bot that is stopped must not keep its channels or its file open.
       try {
         await this.#gateway.stop();
@@ -537,11 +550,73 @@ export class Bot implements WakeTarget {
     return places.size === 1 ? [...places][0] : undefined;
   }
 
-  async deliver(wake: PlaceWake, caller?: TelemetrySpan): Promise<Delivered> {
+  beginInputFeedback(messages: readonly FeedbackMessage[], place: Address): InputProgress | undefined {
+    const targets = this.#inputFeedback.targets(messages, place);
+    if (!targets.length) return;
+    const progress = this.#inputFeedback.start(targets, true);
+    return { ...progress, complete: () => this.#inputFeedback.finish(targets, true) };
+  }
+
+  async deliver(wake: PlaceWake, caller?: TelemetrySpan, acknowledged = false): Promise<Delivered> {
     const me = this.#gateway.channels.find((channel) => channel.owns(wake.place.address))?.me;
     const children = await this.#agent.childrenNow(this.#workingChildren(wake.place.address));
     const text = renderPlaceWake(wake, await this.#agent.contextStatus(), me, children);
-    return this.#submit(wake.id, wake.reason, wake.place.address, text, wake.reason === "steer", caller);
+    const submit = () => this.#submit(wake.id, wake.reason, wake.place.address, text, wake.reason === "steer", caller);
+    const targets = this.#inputFeedback.targets(
+      wake.events.flatMap(({ kind, deleted, message, thread }) =>
+        kind === "message" && !deleted && message ? [{ message, ...(thread ? { thread } : {}) }] : []),
+      wake.place.address,
+    );
+    if (!targets.length) return submit();
+    // Persist before submitting so a replay can reattach to the same durable submission.
+    await this.#sql.run("INSERT OR IGNORE INTO bot_input_feedback (wake_id, targets) VALUES (?, ?)", wake.id, JSON.stringify(targets));
+    const lease = this.#inputFeedback.start(targets, !acknowledged && !(await this.#agent.submitted(wake.id)));
+    try {
+      await lease.ready;
+      const delivered = await submit();
+      this.#watchInputFeedback(wake.id, delivered.submission, targets, lease);
+      return delivered;
+    } catch (error) {
+      lease.stop();
+      throw error;
+    }
+  }
+
+  async #resumeInputFeedback(): Promise<void> {
+    const pending = await this.#sql.all<{ wake_id: string; submission: string; targets: string }>(
+      `SELECT f.wake_id, f.targets, w.submission FROM bot_input_feedback f
+        JOIN bot_wakes w ON w.id = f.wake_id WHERE w.submission IS NOT NULL`,
+    );
+    for (const { wake_id, submission, targets } of pending) {
+      this.#watchInputFeedback(wake_id, submission, JSON.parse(targets) as FeedbackTarget[]);
+    }
+  }
+
+  #watchInputFeedback(wakeId: string, submission: string, targets: FeedbackTarget[], lease?: FeedbackLease): void {
+    if (this.#feedbackTasks.has(wakeId)) {
+      lease?.stop();
+      return;
+    }
+    const signal = this.#feedbackAbort.signal;
+    const task = this.#agent.waitForSubmission(submission, signal, () => {
+      lease ??= this.#inputFeedback.start(targets, false);
+    }).then(async (completed) => {
+      lease?.stop();
+      if (signal.aborted) return;
+      await this.#inputFeedback.finish(targets, completed);
+      await this.#sql.run("DELETE FROM bot_input_feedback WHERE wake_id = ?", wakeId);
+    }).catch((error) => {
+      if (!signal.aborted) this.#print("input feedback could not be settled", { wakeId, error: String(error) });
+    }).finally(() => {
+      lease?.stop();
+      this.#feedbackTasks.delete(wakeId);
+    });
+    this.#feedbackTasks.set(wakeId, task);
+  }
+
+  async #stopInputFeedback(): Promise<void> {
+    this.#feedbackAbort.abort();
+    await Promise.all(this.#feedbackTasks.values());
   }
 
   responsibilities(): Promise<string> {

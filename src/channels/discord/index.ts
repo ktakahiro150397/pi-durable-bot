@@ -67,6 +67,7 @@ interface ApiUser {
   username?: string;
   global_name?: string | null;
   member?: { nick?: string | null };
+  bot?: boolean;
 }
 
 interface ApiAttachment {
@@ -153,6 +154,8 @@ const SYSTEM_TEXT: Partial<Record<number, (content: string) => string>> = {
 
 /** Discord counts a message's length in Unicode code points. */
 const MAX_LENGTH = 2000;
+const INPUT_RECEIVED = "👀";
+const INPUT_COMPLETED = "☑️";
 const CACHE_TTL_MS = 60 * 60_000;
 const DISCORD_EPOCH = 1420070400000n;
 const STORED = new Set([
@@ -207,7 +210,7 @@ export class DiscordChannel implements ChannelAdapter {
   #refilling: Promise<void> = Promise.resolve();
   readonly #channels = new Map<string, { channel: ApiChannel; at: number }>();
   readonly #guilds = new Map<string, { guild: GuildInfo; at: number }>();
-  readonly #people = new Map<string, { person: PersonInfo; at: number }>();
+  readonly #people = new Map<string, { person: PersonInfo; bot: boolean; at: number }>();
   /** The DM channel with each person the bot sent to. */
   readonly #dms = new Map<string, string>();
 
@@ -505,8 +508,13 @@ export class DiscordChannel implements ChannelAdapter {
         return Promise.all((d.ids as string[]).map((id) => this.#deleted(id, d.channel_id, d.guild_id, at, d, parent)));
       case "MESSAGE_REACTION_ADD":
       case "MESSAGE_REACTION_REMOVE": {
-        const where = await this.#locate(d.channel_id, undefined, parent);
         const emoji = d.emoji as { id?: string | null; name?: string | null; animated?: boolean };
+        const user = (d.member?.user ?? d.user_id) as ApiUser | string;
+        const person = await this.#personInfo(user);
+        // Progress markers from other apps must not cause new decisions or steer another agent.
+        if (!emoji.id && (emoji.name === INPUT_RECEIVED || emoji.name === INPUT_COMPLETED || emoji.name === "☑") &&
+          (d.user_id === this.#botUserId || this.#people.get(d.user_id)?.bot)) return [];
+        const where = await this.#locate(d.channel_id, undefined, parent);
         return [
           {
             kind: t === "MESSAGE_REACTION_ADD" ? "reaction_added" : "reaction_removed",
@@ -514,7 +522,7 @@ export class DiscordChannel implements ChannelAdapter {
             place: await this.#placeInfo(where.place, d.guild_id),
             message: this.#messageAt(where, d.message_id),
             ...(where.thread ? { thread: this.#threadAt(where) } : {}),
-            person: await this.#personInfo(d.member?.user ?? d.user_id),
+            person,
             fromMe: d.user_id === this.#botUserId,
             text: emoji.id ? `<${emoji.animated ? "a" : ""}:${emoji.name}:${emoji.id}>` : (emoji.name ?? "?"),
             raw: d,
@@ -835,7 +843,7 @@ export class DiscordChannel implements ChannelAdapter {
     if (id === this.#botUserId) return this.me!;
     if (typeof user !== "string" && user.username) {
       const person = { address: this.person(id), name: displayName(user) };
-      this.#people.set(id, { person, at: Date.now() });
+      this.#people.set(id, { person, bot: user.bot === true, at: Date.now() });
       return person;
     }
     const cached = this.#people.get(id);
@@ -1059,6 +1067,26 @@ export class DiscordChannel implements ChannelAdapter {
     }
   }
 
+  readonly inputFeedback: NonNullable<ChannelAdapter["inputFeedback"]> = {
+    typing: (place, thread, signal) => explained(this.#typing(place, thread, signal)),
+    status: (message, state, signal) => explained(this.#inputStatus(message, state, signal)),
+  };
+
+  async #typing(place: Address, thread: Address | undefined, signal: AbortSignal): Promise<void> {
+    const parsed = this.#parse(thread ?? place);
+    if (!("channel" in parsed)) throw new Error(`not a place or thread address: ${thread ?? place}`);
+    await this.#rest.post(`/channels/${parsed.message ?? parsed.channel}/typing`, { signal });
+  }
+
+  async #inputStatus(message: Address, state: "processing" | "completed" | "failed", signal: AbortSignal): Promise<void> {
+    if (state === "processing") return this.#react(message, INPUT_RECEIVED, false, signal);
+    try {
+      if (state === "completed") await this.#react(message, INPUT_COMPLETED, false, signal);
+    } finally {
+      await this.#react(message, INPUT_RECEIVED, true, signal);
+    }
+  }
+
   /**
    * React with a Unicode emoji, a custom emoji as name:id or <:name:id>, or a name such as :thumbsup:. Adding a
    * reaction that is there, or removing one that is not, changes nothing and is not an error.
@@ -1067,14 +1095,14 @@ export class DiscordChannel implements ChannelAdapter {
     return explained(this.#react(message, emoji, remove));
   }
 
-  async #react(message: Address, emoji: string, remove: boolean): Promise<void> {
+  async #react(message: Address, emoji: string, remove: boolean, signal?: AbortSignal): Promise<void> {
     const parsed = this.#parse(message);
     if (!("channel" in parsed) || !parsed.message) throw new Error(`not a message address: ${message}`);
     // A forum post's first message is in the post's thread.
     const channel = parsed.thread ?? (FORUMS.has((await this.#channel(parsed.channel)).type) ? parsed.message : parsed.channel);
     const route = `/channels/${channel}/messages/${parsed.message}/reactions/${encodeURIComponent(reactionEmoji(emoji))}/@me` as const;
-    if (remove) await this.#rest.delete(route);
-    else await this.#rest.put(route);
+    if (remove) await this.#rest.delete(route, { signal });
+    else await this.#rest.put(route, { signal });
   }
 
   /**

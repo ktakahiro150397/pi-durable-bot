@@ -680,6 +680,42 @@ describe("Discord channel", () => {
     await expect(channel.react("discord:#20", "👍", false)).rejects.toThrow("not a message address");
   });
 
+  it("shows input feedback in the actual thread and replaces the acknowledgment on the same message", async () => {
+    const { fake, channel, gateway } = await connect();
+    await gateway([["THREAD_CREATE", thread("800", "21", "New idea")]], 1);
+    fake.route("POST", "/channels/800/typing", () => undefined);
+    fake.route("PUT", "/channels/800/messages/800/reactions/[^/]+/@me", () => undefined);
+    fake.route("DELETE", "/channels/800/messages/800/reactions/[^/]+/@me", () => undefined);
+    const signal = new AbortController().signal;
+    await channel.inputFeedback.typing("discord:#21", "discord:#21/800", signal);
+    await channel.inputFeedback.status("discord:#21/800", "processing", signal);
+    await channel.inputFeedback.status("discord:#21/800", "completed", signal);
+    expect(fake.requests.filter(({ path }) => path.includes("/typing") || path.includes("/reactions/"))
+      .map(({ method, path }) => `${method} ${decodeURIComponent(path)}`)).toEqual([
+      "POST /channels/800/typing",
+      "PUT /channels/800/messages/800/reactions/👀/@me",
+      "PUT /channels/800/messages/800/reactions/☑️/@me",
+      "DELETE /channels/800/messages/800/reactions/👀/@me",
+    ]);
+  });
+
+  it("leaves bot status markers out of the inbox while preserving people's reactions", async () => {
+    const { fake, gateway, translate } = await connect();
+    const peer = { ...BOB, bot: true };
+    fake.route("GET", `/users/${peer.id}`, () => peer);
+    const reaction = (user_id: string, name: string) => ({
+      user_id, channel_id: "20", message_id: "501", guild_id: "10", emoji: { id: null, name },
+    });
+    const [removed, added, human] = await gateway([
+      ["MESSAGE_REACTION_REMOVE", reaction(peer.id, "👀")],
+      ["MESSAGE_REACTION_ADD", { ...reaction(peer.id, "☑"), member: { ...member(), user: peer } }],
+      ["MESSAGE_REACTION_ADD", { ...reaction(ALICE.id, "☑️"), member: { ...member(), user: ALICE } }],
+    ], 3);
+    expect(await translate(removed!.raw)).toEqual([]);
+    expect(await translate(added!.raw)).toEqual([]);
+    expect(await translate(human!.raw)).toMatchObject([{ kind: "reaction_added", text: "☑️", person: { address: "discord:@200" } }]);
+  });
+
   it("calls any REST endpoint with the bot token, and uploads a file given as a path", async () => {
     const { fake, channel } = await connect();
     fake.route("POST", "/channels/20/threads", (request) => ({ id: "650", type: 11, name: request.body.name, parent_id: "20" }));

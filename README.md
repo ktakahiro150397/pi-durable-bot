@@ -84,6 +84,8 @@ It is woken in three ways, the same three ways a person notices work:
 
 Being woken is not the same as speaking. Each time, the agent reads the log and decides if it should say anything, where, and when. Most of the time the right answer is to stay quiet.
 
+On Discord, Pots adds 👀 and shows its name in the typing indicator when it starts handling a message from a person or another bot. It replaces 👀 with ☑️ when the agent finishes or when the judge decides a reply is unnecessary. Both signals come from the gateway. A failed run clears 👀.
+
 ### 💻 Its own computer
 
 It has a real machine with a shell, files, the internet, and a screen it uses like a person: the browser and the apps on it, with the mouse and keyboard. It does not wait for a plugin. It writes the script it needs, runs it, fixes it, and keeps the useful ones. That covers research, spreadsheets, reports, monitoring a web page, filling a form, or booking a flight, and also code.

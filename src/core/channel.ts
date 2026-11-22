@@ -150,6 +150,11 @@ export interface ChannelAdapter {
   /** Look for a message with this send ID, sent to `to` after `since`. */
   findSent(to: Address, sendId: string, since: number): Promise<SentMessage | undefined>;
   react(message: Address, emoji: string, remove: boolean): Promise<void>;
+  /** Status shown by the platform while the gateway handles an incoming message. */
+  readonly inputFeedback?: {
+    typing(place: Address, thread: Address | undefined, signal: AbortSignal): Promise<void>;
+    status(message: Address, state: "processing" | "completed" | "failed", signal: AbortSignal): Promise<void>;
+  };
   /** Call a platform API method directly. The token stays in the adapter. */
   call(method: string, params: Record<string, unknown>): Promise<unknown>;
   /**

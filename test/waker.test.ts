@@ -492,6 +492,39 @@ describe("reasons", () => {
 });
 
 describe("the judge", () => {
+  it.effect("acknowledges the message before judging and completes feedback when no wake is needed", () => {
+    const phases: string[] = [];
+    return withCore({
+      judge: { judge: async () => {
+        phases.push("judge");
+        return { related: 0, respond: 0 };
+      } },
+    }, (recorder) => Effect.gen(function* () {
+      const waker = yield* Waker;
+      waker.setTarget({
+        ...recorder.target(),
+        beginInputFeedback: (messages, place) => {
+          assert.strictEqual(messages.length, 1);
+          assert.strictEqual(place, "mem:#general");
+          let stopped = false;
+          return {
+            ready: Promise.resolve().then(() => { phases.push("acknowledge"); }),
+            stop: () => {
+              if (!stopped) phases.push("stop typing");
+              stopped = true;
+            },
+            complete: async () => { phases.push("complete"); },
+          };
+        },
+      });
+      yield* arrive("general", "just a note");
+      yield* advance(3_000);
+      yield* settleUntil(() => phases.includes("complete"));
+      assert.deepStrictEqual(phases, ["acknowledge", "judge", "stop typing", "complete"]);
+      assert.strictEqual(recorder.wakes.length, 0);
+    }));
+  });
+
   const flaky = (failures: number) => {
     const asked: { at: number; input: JudgeInput }[] = [];
     let now = () => 0;
